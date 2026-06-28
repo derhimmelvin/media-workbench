@@ -1,0 +1,22 @@
+[project]
+name = "bilibili-downloader-backend"
+version = "0.1.0"
+description = "Local FastAPI backend for the Bilibili downloader MVP."
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "pydantic>=2.10.0",
+  "yt-dlp>=2026.1.1",
+  "keyring>=25.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "httpx>=0.28.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
