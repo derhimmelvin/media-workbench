@@ -1,0 +1,94 @@
+# B站下载器核心闭环 v1
+
+本项目是一个本地 Web 版 B站下载器 MVP。当前实现聚焦单链接核心闭环：合规确认、链接解析、资源选择、下载、音视频合并、任务进度和基础设置。
+
+## 当前状态
+
+阶段一已完成。已验收内容：
+
+- 公开视频解析与下载。
+- 视频、音频、封面三类资源选择。
+- 视频下载自动携带音频，避免生成无声音视频。
+- 音频输出支持 `m4a` 和 `mp3`。
+- 视频容器支持 `mp4` 和 `mkv`。
+- 任务队列展示进度、状态、下载时间戳，并支持清空已结束任务。
+- 下载完成后可打开文件所在目录。
+- 桌面和移动宽度下的基础响应式验收。
+
+暂缓验收内容：
+
+- 会员/Cookie 授权资源。
+- 不同网络环境下的 412/403 风控场景。
+
+## 技术栈
+
+- 后端：Python 3.10+、FastAPI、SQLite、yt-dlp、FFmpeg、keyring。
+- 前端：Vue 3、Vite、TypeScript、Element Plus、Pinia。
+- 运行方式：本地前后端开发服务，前端通过 Vite 代理访问后端 API 和 WebSocket。
+
+## 快速启动
+
+```bash
+bash scripts/check-env.sh
+bash scripts/dev.sh
+```
+
+默认地址：
+
+- 前端工作台：http://127.0.0.1:5173
+- 后端 API：http://127.0.0.1:8000
+- OpenAPI：http://127.0.0.1:8000/docs
+
+更完整的启动、依赖安装和验收步骤见 [docs/开发启动说明.md](docs/开发启动说明.md)。
+
+## 文档导航
+
+| 文档 | 适用对象 | 用途 |
+|---|---|---|
+| [docs/文档索引.md](docs/文档索引.md) | 所有人 | 查看全部 Markdown 文档的分类和阅读顺序 |
+| [docs/开发启动说明.md](docs/开发启动说明.md) | 开发者、验收人员 | 本地环境、启动命令、验收路径 |
+| [docs/用户使用指南.md](docs/用户使用指南.md) | 非技术用户、测试人员 | 页面功能、资源选择、Cookie、常见问题 |
+| [docs/API接口说明.md](docs/API接口说明.md) | 后端/前端开发者、agent | API、请求响应、任务状态、WebSocket |
+| [docs/测试验收清单.md](docs/测试验收清单.md) | 测试人员、开发者、agent | 自动化测试、手工验收、回归矩阵 |
+| [AGENTS.md](AGENTS.md) | Codex/agent、技术协作者 | 项目约束、关键文件、协作规则 |
+| [哔哩哔哩下载场景功能清单、架构设计、技术选型.md](哔哩哔哩下载场景功能清单、架构设计、技术选型.md) | 产品/技术人员 | 当前功能清单、架构设计、技术选型和扩展方向 |
+
+## 目录结构
+
+```text
+backend/
+  app/                 FastAPI 应用、SQLite、任务执行器、yt-dlp 封装
+  tests/               后端单元测试
+  data/                本地 SQLite 数据库
+frontend/
+  src/                 Vue 工作台、API 客户端、样式
+docs/                  开发、用户、API、测试和文档索引
+downloads/             默认下载目录
+scripts/               环境检查与本地启动脚本
+```
+
+## 常用命令
+
+```bash
+# 环境检查
+bash scripts/check-env.sh
+
+# 一键启动前后端开发服务
+bash scripts/dev.sh
+
+# 后端测试
+backend/.venv/bin/python -m pytest backend/tests
+
+# 前端测试与构建
+cd frontend
+npm test
+npm run build
+```
+
+## 核心约束
+
+- 本工具仅支持用户有权访问的内容，不绕过 DRM、不规避付费或权限控制。
+- B站 Cookie 明文只允许保存到系统钥匙串，SQLite 仅保存是否配置和脱敏摘要。
+- 下载视频时必须同时选择音频流，否则后端会拒绝任务。
+- 设置中的最大并发当前是预留字段，实际执行器仍为串行队列。
+- `flv` 已移除，不作为当前视频容器选项。
