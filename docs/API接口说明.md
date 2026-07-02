@@ -1,6 +1,6 @@
 # API接口说明
 
-本文描述当前 v1 后端 API。后端默认运行在：
+本文描述当前 v2.1 后端 API。后端默认运行在：
 
 ```text
 http://127.0.0.1:8000
@@ -85,7 +85,7 @@ http://127.0.0.1:8000
 ```json
 {
   "configured": true,
-  "masked": "SESSDATA=...; bili_jct=...",
+  "masked": "SESSDATA=...; bili_jct=...; DedeUserID=...",
   "keyring_available": true,
   "message": null
 }
@@ -99,7 +99,7 @@ http://127.0.0.1:8000
 
 ```json
 {
-  "cookie": "SESSDATA=...; bili_jct=..."
+  "cookie": "SESSDATA=...; bili_jct=...; DedeUserID=..."
 }
 ```
 
@@ -125,6 +125,7 @@ http://127.0.0.1:8000
 {
   "download_dir": "/Users/yifan/Desktop/projects/mvp/downloads",
   "default_container": "mp4",
+  "default_audio_format": "m4a",
   "max_concurrent_downloads": 1
 }
 ```
@@ -139,20 +140,28 @@ http://127.0.0.1:8000
 {
   "download_dir": "/Users/yifan/Desktop/projects/mvp/downloads",
   "default_container": "mkv",
+  "default_audio_format": "mp3",
   "max_concurrent_downloads": 1
 }
 ```
 
 当前约束：
 
-- `default_container` 只能是 `mp4` 或 `mkv`。
-- `max_concurrent_downloads` 允许保存，但当前执行器仍串行执行任务。
+- `default_container` 对应设置页“默认视频格式”，只能是 `mp4` 或 `mkv`。
+- `default_audio_format` 对应设置页“默认音频格式”，只能是 `m4a` 或 `mp3`，默认 `m4a`。
+- `max_concurrent_downloads` 表示“同时下载任务数”，控制任务级并发下载数量，范围 1-4；默认 1。
 
 ## 6. 资源预览
 
 ### `POST /api/preview`
 
 解析链接并返回资源列表。
+
+约束：
+
+- 未同意合规声明时返回 403。
+- 若系统钥匙串中存在 B站 Cookie，解析阶段会通过临时 cookiefile 传给 yt-dlp；临时文件在解析结束后删除。
+- 返回的视频流按分辨率高度优先排序；B站 DASH 纯视频流会保留在 `videos` 中，提交下载时必须同时选择音频流。
 
 请求示例：
 
@@ -234,7 +243,8 @@ http://127.0.0.1:8000
   "thumbnail_url": "https://...",
   "merge": true,
   "container": "mp4",
-  "output_dir": null
+  "output_dir": null,
+  "custom_filename": "自定义文件名"
 }
 ```
 
@@ -271,6 +281,8 @@ http://127.0.0.1:8000
 - 未选择视频、音频、封面任一资源时返回 400。
 - 选择视频但没有选择音频时返回 400。
 - 选择封面但没有 `thumbnail_url` 时返回 400。
+- 即使不下载封面，也可以传入 `thumbnail_url`，用于任务队列展示封面缩略图。
+- 同时选择视频和音频时，后端会强制合并；即使请求传入 `merge: false`，任务 `options.merge` 也会保存为 `true`。
 
 任务响应示例：
 
@@ -296,10 +308,17 @@ http://127.0.0.1:8000
     "download_cover": false,
     "thumbnail_url": "https://...",
     "merge": true,
-    "container": "mp4"
+    "container": "mp4",
+    "custom_filename": "自定义文件名"
   }
 }
 ```
+
+命名说明：
+
+- `custom_filename` 为空或不传时，后端默认使用解析后的标题命名。
+- `custom_filename` 会随任务写入 `options`，重试时继续使用同一自定义文件名。
+- 后端会清理非法文件名字符；如果目标文件已存在，会自动追加序号。
 
 ### `GET /api/tasks`
 
@@ -382,8 +401,7 @@ http://127.0.0.1:8000
 
 当前 SQLite 关键表：
 
-- `settings`：下载目录、默认容器、最大并发预留字段、Cookie 脱敏摘要等设置。
+- `settings`：下载目录、默认视频格式、默认音频格式、同时下载任务数、Cookie 脱敏摘要等设置。
 - `compliance_consent`：合规确认状态。
 - `tasks`：任务主体数据。
 - `task_events`：任务状态事件历史。
-

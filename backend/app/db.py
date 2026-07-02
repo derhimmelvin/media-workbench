@@ -85,6 +85,34 @@ class Database:
         with self._lock, self._connect() as conn:
             return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
 
+    def claim_next_queued_task(self) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM tasks WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            task_id = row["id"]
+            timestamp = now_iso()
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'running',
+                    stage = 'preparing',
+                    progress = 1,
+                    message = '准备下载',
+                    updated_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (timestamp, task_id),
+            )
+            if cursor.rowcount != 1:
+                conn.commit()
+                return None
+            claimed = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            conn.commit()
+            return dict(claimed) if claimed else None
+
     def get_setting(self, key: str) -> str | None:
         row = self.query_one("SELECT value FROM settings WHERE key = ?", (key,))
         return str(row["value"]) if row else None

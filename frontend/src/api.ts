@@ -22,10 +22,12 @@ export type CookieStatus = {
 }
 
 export type ContainerFormat = 'mp4' | 'mkv'
+export type AudioOutputFormat = 'm4a' | 'mp3'
 
 export type SettingsResponse = {
   download_dir: string
   default_container: ContainerFormat
+  default_audio_format: AudioOutputFormat
   max_concurrent_downloads: number
 }
 
@@ -79,6 +81,20 @@ export type ClearTasksResponse = {
   cleared: number
 }
 
+export type TaskCreatePayload = {
+  url: string
+  title?: string
+  video_format_id?: string
+  audio_format_id?: string
+  audio_output_format?: AudioOutputFormat
+  download_cover?: boolean
+  thumbnail_url?: string
+  merge: boolean
+  container: ContainerFormat
+  output_dir?: string
+  custom_filename?: string
+}
+
 const jsonHeaders = { 'Content-Type': 'application/json' }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -130,18 +146,7 @@ export const api = {
     request<ClearTasksResponse>('/api/tasks', {
       method: 'DELETE'
     }),
-  createTask: (payload: {
-    url: string
-    title?: string
-    video_format_id?: string
-    audio_format_id?: string
-    audio_output_format?: 'm4a' | 'mp3'
-    download_cover?: boolean
-    thumbnail_url?: string
-    merge: boolean
-    container: ContainerFormat
-    output_dir?: string
-  }) =>
+  createTask: (payload: TaskCreatePayload) =>
     request<TaskResponse>('/api/tasks', {
       method: 'POST',
       headers: jsonHeaders,

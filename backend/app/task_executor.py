@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import queue
 import threading
 import uuid
 from pathlib import Path
@@ -78,42 +77,65 @@ class TaskExecutor:
         self.credential_store = credential_store
         self.config = config
         self.hub = hub
-        self._queue: queue.Queue[str] = queue.Queue()
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._stop.set()
+        self._threads: dict[int, threading.Thread] = {}
+        self._worker_lock = threading.RLock()
+        self._desired_workers = 1
         self._cancel_flags: dict[str, threading.Event] = {}
-        self._current_task_id: str | None = None
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        if any(thread.is_alive() for thread in self._threads.values()):
             return
         self.db.execute(
             "UPDATE tasks SET status = 'queued', stage = 'queued', updated_at = ? WHERE status = 'running'",
             (now_iso(),),
         )
-        for task in self.db.query_all("SELECT id FROM tasks WHERE status = 'queued' ORDER BY created_at ASC"):
-            self._queue.put(task["id"])
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="task-executor", daemon=True)
-        self._thread.start()
+        self.configure(self._configured_worker_count())
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
+        for thread in list(self._threads.values()):
+            if thread.is_alive():
+                thread.join(timeout=2)
+        with self._worker_lock:
+            self._threads = {slot: thread for slot, thread in self._threads.items() if thread.is_alive()}
+
+    def configure(self, max_workers: int) -> None:
+        worker_count = max(1, min(4, int(max_workers)))
+        with self._worker_lock:
+            self._desired_workers = worker_count
+            if self._stop.is_set():
+                return
+            for slot in range(worker_count):
+                thread = self._threads.get(slot)
+                if thread and thread.is_alive():
+                    continue
+                thread = threading.Thread(target=self._run_worker, args=(slot,), name=f"task-executor-{slot + 1}", daemon=True)
+                self._threads[slot] = thread
+                thread.start()
+
+    def _configured_worker_count(self) -> int:
+        try:
+            return int(self.db.get_setting("max_concurrent_downloads") or "1")
+        except (TypeError, ValueError):
+            return 1
 
     def submit(self, request: TaskCreateRequest) -> TaskResponse:
         output_dir = request.output_dir or self.db.get_setting("download_dir") or str(self.config.default_download_dir)
         output_path = ensure_directory(output_dir)
         task_id = str(uuid.uuid4())
+        should_merge = bool(request.video_format_id and request.audio_format_id)
         options = {
             "video_format_id": request.video_format_id,
             "audio_format_id": request.audio_format_id,
             "audio_output_format": request.audio_output_format,
             "download_cover": request.download_cover,
             "thumbnail_url": request.thumbnail_url,
-            "merge": request.merge,
+            "merge": should_merge,
             "container": request.container,
+            "custom_filename": request.custom_filename.strip() if request.custom_filename else None,
         }
         timestamp = now_iso()
         self.db.execute(
@@ -136,7 +158,6 @@ class TaskExecutor:
             ),
         )
         self._record_event(task_id, "queued", "queued", 0, "等待下载")
-        self._queue.put(task_id)
         return self.get(task_id)
 
     def list(self) -> list[TaskResponse]:
@@ -162,7 +183,6 @@ class TaskExecutor:
             return self._to_response(row)
         self._cancel_flags.pop(task_id, None)
         self._update_task(task_id, status="queued", stage="queued", progress=0, message="等待重试", error=None)
-        self._queue.put(task_id)
         return self.get(task_id)
 
     def clear_finished(self) -> int:
@@ -177,39 +197,41 @@ class TaskExecutor:
             self._cancel_flags.pop(task_id, None)
         return len(task_ids)
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                task_id = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            try:
-                row = self._get_row(task_id)
-            except KeyError:
-                self._queue.task_done()
-                continue
-            if row["status"] != "queued":
-                self._queue.task_done()
-                continue
-            self._current_task_id = task_id
-            self._cancel_flags.setdefault(task_id, threading.Event()).clear()
-            try:
-                self._execute(row)
-            finally:
-                self._current_task_id = None
-                self._queue.task_done()
+    def _run_worker(self, slot: int) -> None:
+        try:
+            while not self._stop.is_set():
+                with self._worker_lock:
+                    if slot >= self._desired_workers:
+                        break
+                row = self.db.claim_next_queued_task()
+                if not row:
+                    self._stop.wait(0.5)
+                    continue
+                task_id = row["id"]
+                self._cancel_flags.setdefault(task_id, threading.Event())
+                try:
+                    self._execute(row)
+                finally:
+                    self._cancel_flags.pop(task_id, None)
+        finally:
+            with self._worker_lock:
+                if self._threads.get(slot) is threading.current_thread():
+                    self._threads.pop(slot, None)
 
     def _execute(self, task: dict[str, Any]) -> None:
         task_id = task["id"]
         try:
+            if self._is_cancelled(task_id):
+                raise DownloadCancelled("任务已取消。")
             self._update_task(task_id, status="running", stage="preparing", progress=1, message="准备下载")
+            options = self._options_for_execution(task)
             cookie = None
             try:
                 cookie = self.credential_store.get_bilibili_cookie()
             except Exception:
                 cookie = None
             output_path = self.extractor.download(
-                {**task, "options": json.loads(task["options_json"])},
+                {**task, "options": options},
                 AuthContext(cookie=cookie),
                 self._progress_hook(task_id),
             )
@@ -253,6 +275,16 @@ class TaskExecutor:
                 error=str(exc),
                 completed_at=now_iso(),
             )
+
+    def _options_for_execution(self, task: dict[str, Any]) -> dict[str, Any]:
+        options = json.loads(task["options_json"])
+        if options.get("video_format_id") and options.get("audio_format_id") and options.get("merge") is not True:
+            options["merge"] = True
+            self.db.execute(
+                "UPDATE tasks SET options_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(options, ensure_ascii=False), now_iso(), task["id"]),
+            )
+        return options
 
     def _progress_hook(self, task_id: str):
         def hook(data: dict[str, Any]) -> None:

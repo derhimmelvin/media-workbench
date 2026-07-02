@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 
 TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -81,6 +81,7 @@ class TaskCreateRequest(BaseModel):
     merge: bool = True
     container: ContainerFormat = "mp4"
     output_dir: str | None = None
+    custom_filename: str | None = Field(default=None, max_length=200)
 
 
 class TaskResponse(BaseModel):
@@ -112,10 +113,12 @@ class OpenFolderResponse(BaseModel):
 class SettingsResponse(BaseModel):
     download_dir: str
     default_container: ContainerFormat
+    default_audio_format: AudioOutputFormat
     max_concurrent_downloads: int
 
 
 class SettingsUpdateRequest(BaseModel):
     download_dir: str | None = None
     default_container: ContainerFormat | None = None
+    default_audio_format: AudioOutputFormat | None = None
     max_concurrent_downloads: int | None = Field(default=None, ge=1, le=4)

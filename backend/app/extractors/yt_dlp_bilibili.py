@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -9,7 +12,11 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from .base import AuthContext, BaseExtractor, ExtractorError
 from ..media import MediaProxyError, ThumbnailPayload, fetch_thumbnail
 from ..schemas import MediaFormat, PreviewResponse
-from ..utils import ffmpeg_available, sanitize_filename
+from ..utils import (
+    ffmpeg_available,
+    sanitize_filename,
+    unique_path,
+)
 
 
 BILIBILI_PATTERN = re.compile(
@@ -17,6 +24,7 @@ BILIBILI_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SAFE_BILIBILI_QUERY_KEYS = {"p", "page", "bvid", "aid", "cid", "ep_id", "season_id"}
+COOKIE_ATTRIBUTE_NAMES = {"domain", "path", "expires", "max-age", "secure", "httponly", "samesite"}
 
 
 class _YtDlpLogger:
@@ -81,6 +89,91 @@ def _convert_audio_to_mp3(source_path: Path, target_path: Path) -> Path:
     return target_path
 
 
+def _stem_exists(output_dir: Path, stem: str) -> bool:
+    return any(path.name == stem or path.name.startswith(f"{stem}.") for path in output_dir.iterdir())
+
+
+def _unique_stem(output_dir: Path, stem: str) -> str:
+    candidate = stem
+    if not _stem_exists(output_dir, candidate):
+        return candidate
+    for index in range(2, 10000):
+        candidate = f"{stem}-{index}"
+        if not _stem_exists(output_dir, candidate):
+            return candidate
+    raise ExtractorError(f"无法生成不冲突的文件名：{stem}")
+
+
+def _output_stem(
+    output_dir: Path,
+    task: dict[str, Any],
+    options: dict[str, Any],
+    resource: str,
+    distinct_resource: bool = False,
+) -> str:
+    fallback_title = sanitize_filename(task.get("title") or "bilibili-video", "bilibili-video")
+    stem = sanitize_filename(str(options.get("custom_filename") or ""), fallback=fallback_title)
+    if distinct_resource:
+        stem = sanitize_filename(f"{stem}.{resource}", fallback=resource)
+    return _unique_stem(output_dir, stem)
+
+
+def _looks_like_netscape_cookie_file(cookie: str) -> bool:
+    lines = [line.strip() for line in cookie.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if any(line.startswith("# Netscape HTTP Cookie File") for line in lines):
+        return True
+    return any(len(line.split("\t")) >= 7 for line in lines if not line.startswith("#"))
+
+
+def _cookie_pairs(cookie: str) -> list[tuple[str, str]]:
+    raw = re.sub(r"^Cookie:\s*", "", cookie.strip(), flags=re.IGNORECASE)
+    raw = raw.replace("\r", "\n").replace("\n", "; ")
+    pairs: list[tuple[str, str]] = []
+    for segment in raw.split(";"):
+        name, separator, value = segment.partition("=")
+        if not separator:
+            continue
+        name = name.strip()
+        if not name or name.lower() in COOKIE_ATTRIBUTE_NAMES:
+            continue
+        sanitized_name = name.replace("\t", " ").replace("\n", " ").strip()
+        sanitized_value = value.strip().replace("\t", " ").replace("\n", " ")
+        if sanitized_name:
+            pairs.append((sanitized_name, sanitized_value))
+    return pairs
+
+
+def _netscape_cookie_content(cookie: str) -> str:
+    stripped = cookie.strip()
+    if _looks_like_netscape_cookie_file(stripped):
+        return stripped + ("\n" if not stripped.endswith("\n") else "")
+    pairs = _cookie_pairs(stripped)
+    if not pairs:
+        return ""
+    lines = [
+        "# Netscape HTTP Cookie File",
+        "# This temporary file is generated for yt-dlp and deleted after use.",
+    ]
+    for name, value in pairs:
+        lines.append(f".bilibili.com\tTRUE\t/\tFALSE\t2147483647\t{name}\t{value}")
+    return "\n".join(lines) + "\n"
+
+
+def _media_height(item: MediaFormat) -> int:
+    for source in (item.resolution, item.quality, item.label):
+        if not source:
+            continue
+        resolution_match = re.search(r"[xX]\s*(\d{3,4})", source)
+        if resolution_match:
+            return int(resolution_match.group(1))
+        quality_match = re.search(r"(?<!\d)(\d{3,4})\s*[pP]", source)
+        if quality_match:
+            return int(quality_match.group(1))
+    return 0
+
+
 class YtDlpBilibiliExtractor(BaseExtractor):
     def supports(self, url: str) -> bool:
         return bool(BILIBILI_PATTERN.search(url.strip()))
@@ -132,8 +225,6 @@ class YtDlpBilibiliExtractor(BaseExtractor):
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Dest": "empty",
         }
-        if auth and auth.cookie:
-            headers["Cookie"] = auth.cookie
         options: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -146,14 +237,49 @@ class YtDlpBilibiliExtractor(BaseExtractor):
         options.update(extra)
         return options
 
+    @contextmanager
+    def _temporary_cookiefile(self, auth: AuthContext | None = None) -> Iterator[str | None]:
+        if not auth or not auth.cookie:
+            yield None
+            return
+        content = _netscape_cookie_content(auth.cookie)
+        if not content:
+            yield None
+            return
+        handle = tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            prefix="bilibili-cookie-",
+            suffix=".txt",
+            delete=False,
+        )
+        try:
+            with handle:
+                handle.write(content)
+            yield handle.name
+        finally:
+            try:
+                Path(handle.name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @contextmanager
+    def _ydl_options(self, auth: AuthContext | None = None, **extra: Any) -> Iterator[dict[str, Any]]:
+        with self._temporary_cookiefile(auth) as cookiefile:
+            options = self._options(auth, **extra)
+            if cookiefile:
+                options["cookiefile"] = cookiefile
+            yield options
+
     def fetch_info(self, url: str, auth: AuthContext | None = None) -> dict[str, Any]:
         if not self.supports(url):
             raise ExtractorError("当前仅支持 B站链接、BV号、av号、ep号或 ss号。")
         YoutubeDL = self._ydl_class()
         normalized_url = self.normalize_url(url)
         try:
-            with YoutubeDL(self._options(auth)) as ydl:
-                raw = ydl.extract_info(normalized_url, download=False)
+            with self._ydl_options(auth) as options:
+                with YoutubeDL(options) as ydl:
+                    raw = ydl.extract_info(normalized_url, download=False)
         except Exception as exc:
             raise ExtractorError(f"解析失败：{self._friendly_error(exc)}") from exc
         if not raw:
@@ -232,7 +358,7 @@ class YtDlpBilibiliExtractor(BaseExtractor):
                     )
                 )
 
-        videos.sort(key=lambda item: (item.bitrate or 0, item.fps or 0), reverse=True)
+        videos.sort(key=lambda item: (_media_height(item), item.bitrate or 0, item.fps or 0), reverse=True)
         audios.sort(key=lambda item: item.bitrate or 0, reverse=True)
 
         return PreviewResponse(
@@ -250,7 +376,6 @@ class YtDlpBilibiliExtractor(BaseExtractor):
         options = task["options"]
         output_dir = Path(task["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
-        title = sanitize_filename(task.get("title") or "bilibili-video")
         merge = bool(options.get("merge", True))
         container = options.get("container", "mp4")
         video_format_id = options.get("video_format_id")
@@ -258,6 +383,8 @@ class YtDlpBilibiliExtractor(BaseExtractor):
         audio_output_format = options.get("audio_output_format", "m4a")
         download_cover = bool(options.get("download_cover", False))
         thumbnail_url = options.get("thumbnail_url")
+        has_media_output = bool(video_format_id or audio_format_id)
+        has_multiple_outputs = bool(download_cover and has_media_output) or bool(video_format_id and audio_format_id and not merge)
         if not video_format_id and not audio_format_id and not download_cover:
             raise ExtractorError("请至少选择一个视频、音频或封面资源。")
         if video_format_id and not audio_format_id:
@@ -274,7 +401,8 @@ class YtDlpBilibiliExtractor(BaseExtractor):
                 payload = fetch_thumbnail(str(thumbnail_url))
             except MediaProxyError as exc:
                 raise ExtractorError(f"封面下载失败：{exc}") from exc
-            cover_path = output_dir / f"{title}.cover.{_thumbnail_extension(payload)}"
+            cover_stem = _output_stem(output_dir, task, options, "cover", distinct_resource=has_multiple_outputs)
+            cover_path = unique_path(output_dir / f"{cover_stem}.{_thumbnail_extension(payload)}")
             cover_path.write_bytes(payload.content)
             outputs.append(str(cover_path))
 
@@ -282,7 +410,7 @@ class YtDlpBilibiliExtractor(BaseExtractor):
             return "\n".join(outputs)
 
         YoutubeDL = self._ydl_class()
-        download_options = self._options(
+        ydl_options_context = self._ydl_options(
             auth,
             skip_download=False,
             progress_hooks=[progress_hook] if progress_hook else [],
@@ -290,37 +418,44 @@ class YtDlpBilibiliExtractor(BaseExtractor):
             retries=3,
             fragment_retries=3,
             merge_output_format=container,
-            outtmpl=str(output_dir / f"{title}.%(ext)s"),
         )
 
-        if merge and video_format_id and audio_format_id:
-            download_options["format"] = f"{video_format_id}+{audio_format_id}"
-            with YoutubeDL(download_options) as ydl:
-                ydl.download([self.normalize_url(task["url"])])
-            outputs.append(str(output_dir / f"{title}.{container}"))
-            return "\n".join(outputs)
+        with ydl_options_context as download_options:
+            if merge and video_format_id and audio_format_id:
+                output_stem = _output_stem(output_dir, task, options, "video")
+                before = {
+                    path
+                    for path in output_dir.iterdir()
+                    if path.is_file() and path.name.startswith(f"{output_stem}.")
+                }
+                download_options["format"] = f"{video_format_id}+{audio_format_id}"
+                download_options["outtmpl"] = str(output_dir / f"{output_stem}.%(ext)s")
+                with YoutubeDL(download_options) as ydl:
+                    ydl.download([self.normalize_url(task["url"])])
+                outputs.append(str(_find_downloaded_file(output_dir, output_stem, before)))
+                return "\n".join(outputs)
 
-        for label, format_id in (("video", video_format_id), ("audio", audio_format_id)):
-            if not format_id:
-                continue
-            single_options = dict(download_options)
-            single_options["format"] = format_id
-            output_stem = f"{title}.{label}"
-            before = {
-                path
-                for path in output_dir.iterdir()
-                if path.is_file() and path.name.startswith(f"{output_stem}.")
-            }
-            single_options["outtmpl"] = str(output_dir / f"{output_stem}.%(ext)s")
-            with YoutubeDL(single_options) as ydl:
-                ydl.download([self.normalize_url(task["url"])])
-            downloaded_path = _find_downloaded_file(output_dir, output_stem, before)
-            if label == "audio" and audio_output_format == "mp3":
-                source_path = downloaded_path
-                target_path = output_dir / f"{output_stem}.mp3"
-                if source_path.suffix.lower() != ".mp3":
-                    downloaded_path = _convert_audio_to_mp3(source_path, target_path)
-                if source_path != downloaded_path and source_path.exists():
-                    source_path.unlink()
-            outputs.append(str(downloaded_path))
+            for label, format_id in (("video", video_format_id), ("audio", audio_format_id)):
+                if not format_id:
+                    continue
+                single_options = dict(download_options)
+                single_options["format"] = format_id
+                output_stem = _output_stem(output_dir, task, options, label, distinct_resource=has_multiple_outputs)
+                before = {
+                    path
+                    for path in output_dir.iterdir()
+                    if path.is_file() and path.name.startswith(f"{output_stem}.")
+                }
+                single_options["outtmpl"] = str(output_dir / f"{output_stem}.%(ext)s")
+                with YoutubeDL(single_options) as ydl:
+                    ydl.download([self.normalize_url(task["url"])])
+                downloaded_path = _find_downloaded_file(output_dir, output_stem, before)
+                if label == "audio" and audio_output_format == "mp3":
+                    source_path = downloaded_path
+                    target_path = unique_path(output_dir / f"{output_stem}.mp3")
+                    if source_path.suffix.lower() != ".mp3":
+                        downloaded_path = _convert_audio_to_mp3(source_path, target_path)
+                    if source_path != downloaded_path and source_path.exists():
+                        source_path.unlink()
+                outputs.append(str(downloaded_path))
         return "\n".join(outputs)

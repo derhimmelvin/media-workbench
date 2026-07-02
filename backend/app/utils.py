@@ -26,6 +26,16 @@ def sanitize_filename(value: str, fallback: str = "download") -> str:
     return cleaned[:180] or fallback
 
 
+def unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(2, 10000):
+        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"无法生成不冲突的文件名：{path}")
+
+
 def sha256_short(value: str, size: int = 12) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:size]
 

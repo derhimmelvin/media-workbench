@@ -21,6 +21,7 @@ from .schemas import (
     ComplianceStatus,
     CookieSaveRequest,
     CookieStatus,
+    AudioOutputFormat,
     ContainerFormat,
     HealthResponse,
     PreviewRequest,
@@ -32,7 +33,13 @@ from .schemas import (
     TaskResponse,
 )
 from .task_executor import TaskExecutor, TaskWebSocketHub
-from .utils import ensure_directory, ffmpeg_available, open_directory, resolve_task_output_directory, runtime_versions
+from .utils import (
+    ensure_directory,
+    ffmpeg_available,
+    open_directory,
+    resolve_task_output_directory,
+    runtime_versions,
+)
 
 
 COMPLIANCE_STATEMENT = (
@@ -46,6 +53,7 @@ extractor = YtDlpBilibiliExtractor()
 hub = TaskWebSocketHub()
 executor = TaskExecutor(db, extractor, credential_store, config, hub)
 ALLOWED_CONTAINERS = {"mp4", "mkv"}
+ALLOWED_AUDIO_OUTPUT_FORMATS = {"m4a", "mp3"}
 
 
 @asynccontextmanager
@@ -76,6 +84,10 @@ def _ensure_default_settings() -> None:
     normalized_container = _normalize_container(stored_container)
     if stored_container != normalized_container:
         db.set_setting("default_container", normalized_container)
+    stored_audio_format = db.get_setting("default_audio_format")
+    normalized_audio_format = _normalize_audio_format(stored_audio_format)
+    if stored_audio_format != normalized_audio_format:
+        db.set_setting("default_audio_format", normalized_audio_format)
     if not db.get_setting("max_concurrent_downloads"):
         db.set_setting("max_concurrent_downloads", "1")
 
@@ -86,11 +98,23 @@ def _normalize_container(value: str | None) -> ContainerFormat:
     return "mp4"
 
 
+def _normalize_audio_format(value: str | None) -> AudioOutputFormat:
+    if value in ALLOWED_AUDIO_OUTPUT_FORMATS:
+        return cast(AudioOutputFormat, value)
+    return "m4a"
+
+
 def _task_or_404(task_id: str) -> TaskResponse:
     try:
         return executor.get(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="任务不存在。") from exc
+
+
+def _require_compliance() -> None:
+    row = db.query_one("SELECT accepted FROM compliance_consent WHERE id = 1")
+    if not row or not row["accepted"]:
+        raise HTTPException(status_code=403, detail="请先同意合规声明。")
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -179,6 +203,7 @@ def get_settings() -> SettingsResponse:
     return SettingsResponse(
         download_dir=db.get_setting("download_dir") or str(config.default_download_dir),
         default_container=_normalize_container(db.get_setting("default_container")),
+        default_audio_format=_normalize_audio_format(db.get_setting("default_audio_format")),
         max_concurrent_downloads=int(db.get_setting("max_concurrent_downloads") or "1"),
     )
 
@@ -189,13 +214,18 @@ def update_settings(request: SettingsUpdateRequest) -> SettingsResponse:
         db.set_setting("download_dir", str(ensure_directory(request.download_dir)))
     if request.default_container is not None:
         db.set_setting("default_container", request.default_container)
+    if request.default_audio_format is not None:
+        db.set_setting("default_audio_format", request.default_audio_format)
     if request.max_concurrent_downloads is not None:
         db.set_setting("max_concurrent_downloads", str(request.max_concurrent_downloads))
-    return get_settings()
+    settings = get_settings()
+    executor.configure(settings.max_concurrent_downloads)
+    return settings
 
 
 @app.post("/api/preview", response_model=PreviewResponse)
 def preview(request: PreviewRequest) -> PreviewResponse:
+    _require_compliance()
     if not extractor.supports(request.url):
         raise HTTPException(status_code=400, detail="当前仅支持 B站链接、BV号、av号、ep号或 ss号。")
     try:
@@ -227,9 +257,7 @@ def thumbnail(url: str) -> Response:
 
 @app.post("/api/tasks", response_model=TaskResponse)
 def create_task(request: TaskCreateRequest) -> TaskResponse:
-    row = db.query_one("SELECT accepted FROM compliance_consent WHERE id = 1")
-    if not row or not row["accepted"]:
-        raise HTTPException(status_code=403, detail="请先同意合规声明。")
+    _require_compliance()
     if not extractor.supports(request.url):
         raise HTTPException(status_code=400, detail="当前仅支持 B站链接、BV号、av号、ep号或 ss号。")
     if not request.video_format_id and not request.audio_format_id and not request.download_cover:

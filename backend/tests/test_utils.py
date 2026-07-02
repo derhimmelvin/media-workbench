@@ -1,4 +1,9 @@
-from app.utils import mask_cookie, resolve_task_output_directory, sanitize_filename
+from app.utils import (
+    mask_cookie,
+    resolve_task_output_directory,
+    sanitize_filename,
+    unique_path,
+)
 
 
 def test_sanitize_filename_removes_illegal_chars():
@@ -7,6 +12,13 @@ def test_sanitize_filename_removes_illegal_chars():
 
 def test_sanitize_filename_uses_fallback_for_empty_values():
     assert sanitize_filename("   ... ", fallback="fallback") == "fallback"
+
+
+def test_unique_path_appends_counter_for_existing_file(tmp_path):
+    existing = tmp_path / "Example.mp4"
+    existing.write_bytes(b"video")
+
+    assert unique_path(existing) == tmp_path / "Example-2.mp4"
 
 
 def test_mask_cookie_never_returns_raw_cookie():
