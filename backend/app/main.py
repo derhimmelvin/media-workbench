@@ -14,6 +14,7 @@ from .config import config
 from .db import Database
 from .extractors import ExtractorError, YtDlpBilibiliExtractor
 from .extractors.base import AuthContext
+from .extractors.yt_dlp_bilibili import UNSUPPORTED_INPUT_MESSAGE
 from .media import MediaProxyError, fetch_thumbnail
 from .schemas import (
     ClearTasksResponse,
@@ -227,7 +228,7 @@ def update_settings(request: SettingsUpdateRequest) -> SettingsResponse:
 def preview(request: PreviewRequest) -> PreviewResponse:
     _require_compliance()
     if not extractor.supports(request.url):
-        raise HTTPException(status_code=400, detail="当前仅支持 B站链接、BV号、av号、ep号或 ss号。")
+        raise HTTPException(status_code=400, detail=UNSUPPORTED_INPUT_MESSAGE)
     try:
         cookie = credential_store.get_bilibili_cookie()
     except Exception:
@@ -259,7 +260,7 @@ def thumbnail(url: str) -> Response:
 def create_task(request: TaskCreateRequest) -> TaskResponse:
     _require_compliance()
     if not extractor.supports(request.url):
-        raise HTTPException(status_code=400, detail="当前仅支持 B站链接、BV号、av号、ep号或 ss号。")
+        raise HTTPException(status_code=400, detail=UNSUPPORTED_INPUT_MESSAGE)
     if not request.video_format_id and not request.audio_format_id and not request.download_cover:
         raise HTTPException(status_code=400, detail="请至少选择一个视频、音频或封面资源。")
     if request.video_format_id and not request.audio_format_id:

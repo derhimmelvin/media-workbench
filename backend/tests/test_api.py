@@ -72,3 +72,21 @@ def test_preview_passes_cookie_to_extractor(monkeypatch: pytest.MonkeyPatch, tmp
     main.preview(PreviewRequest(url="https://www.bilibili.com/video/BV1xx"))
 
     assert extractor.cookie == "SESSDATA=abc123; bili_jct=csrf-token"
+
+
+def test_preview_rejects_non_video_bilibili_page_with_clear_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    db = Database(tmp_path / "app.sqlite3")
+    db.initialize()
+    db.execute(
+        "INSERT INTO compliance_consent (id, accepted, version, accepted_at) VALUES (1, 1, 'test', '2026-01-01T00:00:00+08:00')"
+    )
+    monkeypatch.setattr(main, "db", db)
+
+    with pytest.raises(HTTPException) as exc:
+        main.preview(PreviewRequest(url="https://search.bilibili.com/all"))
+
+    assert exc.value.status_code == 400
+    assert "这不是可解析的视频链接" in str(exc.value.detail)
+    assert "Unsupported URL" not in str(exc.value.detail)

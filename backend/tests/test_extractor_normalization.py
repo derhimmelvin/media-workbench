@@ -80,6 +80,14 @@ def test_normalize_url_removes_tracking_parameters():
     ) == "https://www.bilibili.com/video/BV1aY4y1D7XG/?p=2"
 
 
+def test_supports_rejects_non_video_bilibili_pages():
+    extractor = YtDlpBilibiliExtractor()
+
+    assert extractor.supports("https://www.bilibili.com/video/BV1aY4y1D7XG")
+    assert extractor.supports("https://www.bilibili.com/bangumi/play/ep123456")
+    assert not extractor.supports("https://search.bilibili.com/all?keyword=BV1aY4y1D7XG")
+
+
 def test_options_include_browser_like_headers():
     extractor = YtDlpBilibiliExtractor()
     options = extractor._options()
@@ -132,6 +140,15 @@ def test_friendly_412_error_message():
     extractor = YtDlpBilibiliExtractor()
 
     assert "412 Precondition Failed" in extractor._friendly_error(RuntimeError("HTTP Error 412: Precondition Failed"))
+
+
+def test_friendly_unsupported_url_message_strips_ansi_codes():
+    extractor = YtDlpBilibiliExtractor()
+    message = extractor._friendly_error(RuntimeError("\x1b[0;31mERROR:\x1b[0m Unsupported URL: https://search.bilibili.com/all"))
+
+    assert "这不是可解析的视频链接" in message
+    assert "\x1b" not in message
+    assert "Unsupported URL" not in message
 
 
 def test_download_cover_only_writes_thumbnail(tmp_path, monkeypatch):

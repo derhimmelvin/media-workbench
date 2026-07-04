@@ -19,12 +19,13 @@ from ..utils import (
 )
 
 
-BILIBILI_PATTERN = re.compile(
-    r"(bilibili\.com|b23\.tv|^BV[0-9A-Za-z]+$|^av\d+$|^ep\d+$|^ss\d+$)",
-    re.IGNORECASE,
-)
+BILIBILI_ID_PATTERN = re.compile(r"^(BV[0-9A-Za-z]+|av\d+|ep\d+|ss\d+)$", re.IGNORECASE)
+BILIBILI_VIDEO_PATH_PATTERN = re.compile(r"^/video/(BV[0-9A-Za-z]+|av\d+)(?:/|$)", re.IGNORECASE)
+BILIBILI_BANGUMI_PATH_PATTERN = re.compile(r"^/bangumi/play/(ep\d+|ss\d+)(?:/|$)", re.IGNORECASE)
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SAFE_BILIBILI_QUERY_KEYS = {"p", "page", "bvid", "aid", "cid", "ep_id", "season_id"}
 COOKIE_ATTRIBUTE_NAMES = {"domain", "path", "expires", "max-age", "secure", "httponly", "samesite"}
+UNSUPPORTED_INPUT_MESSAGE = "这不是可解析的视频链接。请填写 B站视频链接、BV号、av号、ep号或 ss号。"
 
 
 class _YtDlpLogger:
@@ -176,7 +177,28 @@ def _media_height(item: MediaFormat) -> int:
 
 class YtDlpBilibiliExtractor(BaseExtractor):
     def supports(self, url: str) -> bool:
-        return bool(BILIBILI_PATTERN.search(url.strip()))
+        stripped = url.strip()
+        if BILIBILI_ID_PATTERN.match(stripped):
+            return True
+
+        parsed = urlparse(stripped)
+        netloc = parsed.netloc.lower()
+        if netloc == "b23.tv" or netloc.endswith(".b23.tv"):
+            return True
+        if not netloc.endswith("bilibili.com"):
+            return False
+        if BILIBILI_VIDEO_PATH_PATTERN.match(parsed.path):
+            return True
+        if BILIBILI_BANGUMI_PATH_PATTERN.match(parsed.path):
+            return True
+
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        return bool(
+            BILIBILI_ID_PATTERN.match(query.get("bvid", ""))
+            or re.match(r"^\d+$", query.get("aid", ""))
+            or re.match(r"^\d+$", query.get("ep_id", ""))
+            or re.match(r"^\d+$", query.get("season_id", ""))
+        )
 
     def normalize_url(self, url: str) -> str:
         stripped = url.strip()
@@ -273,7 +295,7 @@ class YtDlpBilibiliExtractor(BaseExtractor):
 
     def fetch_info(self, url: str, auth: AuthContext | None = None) -> dict[str, Any]:
         if not self.supports(url):
-            raise ExtractorError("当前仅支持 B站链接、BV号、av号、ep号或 ss号。")
+            raise ExtractorError(UNSUPPORTED_INPUT_MESSAGE)
         YoutubeDL = self._ydl_class()
         normalized_url = self.normalize_url(url)
         try:
@@ -287,7 +309,9 @@ class YtDlpBilibiliExtractor(BaseExtractor):
         return self._normalize_preview(normalized_url, raw).model_dump()
 
     def _friendly_error(self, exc: Exception) -> str:
-        message = str(exc)
+        message = ANSI_ESCAPE_PATTERN.sub("", str(exc)).strip()
+        if "Unsupported URL" in message:
+            return UNSUPPORTED_INPUT_MESSAGE
         if "HTTP Error 412" in message or "Precondition Failed" in message:
             return (
                 "B站接口返回 412 Precondition Failed。通常是请求被风控或当前网络环境被拒绝；"
