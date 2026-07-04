@@ -24,6 +24,15 @@ def test_settings_default_audio_format_rejects_unsupported_value():
         SettingsUpdateRequest(default_audio_format="wav")
 
 
+def test_task_subtitle_format_rejects_unsupported_value():
+    with pytest.raises(ValidationError):
+        TaskCreateRequest(
+            url="https://www.bilibili.com/video/BV1xx",
+            subtitle_track_ids=["normal:zh-Hans"],
+            subtitle_format="vtt",
+        )
+
+
 def test_task_accepts_custom_filename():
     request = TaskCreateRequest(
         url="https://www.bilibili.com/video/BV1xx",

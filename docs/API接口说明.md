@@ -1,6 +1,6 @@
 # API接口说明
 
-本文描述当前 v2.1 后端 API。后端默认运行在：
+本文描述当前 v2.2 后端 API。后端默认运行在：
 
 ```text
 http://127.0.0.1:8000
@@ -209,9 +209,25 @@ http://127.0.0.1:8000
       "filesize": 3456789,
       "requires_auth": false
     }
+  ],
+  "subtitles": [
+    {
+      "id": "normal:zh-Hans",
+      "language": "zh-Hans",
+      "label": "中文（简体）",
+      "source": "normal",
+      "formats": ["srt"]
+    }
   ]
 }
 ```
+
+字幕说明：
+
+- `source` 为 `normal` 表示人工字幕，`automatic` 表示自动字幕。
+- 若同一语言同时存在人工字幕和自动字幕，预览结果优先展示人工字幕。
+- 弹幕 `danmaku/xml` 不属于当前字幕资源，不会作为字幕返回。
+- 当前字幕输出格式支持 `srt` 和 `txt`；`txt` 会提取纯文本内容，不保留时间轴。
 
 ## 7. 封面代理
 
@@ -242,6 +258,8 @@ http://127.0.0.1:8000
   "audio_output_format": "m4a",
   "download_cover": false,
   "thumbnail_url": "https://...",
+  "subtitle_track_ids": ["normal:zh-Hans"],
+  "subtitle_format": "srt",
   "merge": true,
   "container": "mp4",
   "output_dir": null,
@@ -258,6 +276,8 @@ http://127.0.0.1:8000
   "audio_format_id": "30280",
   "audio_output_format": "mp3",
   "download_cover": false,
+  "subtitle_track_ids": [],
+  "subtitle_format": "srt",
   "merge": false,
   "container": "mp4"
 }
@@ -271,6 +291,22 @@ http://127.0.0.1:8000
   "title": "视频标题",
   "download_cover": true,
   "thumbnail_url": "https://...",
+  "subtitle_track_ids": [],
+  "subtitle_format": "srt",
+  "merge": false,
+  "container": "mp4"
+}
+```
+
+请求示例：仅下载字幕。
+
+```json
+{
+  "url": "https://www.bilibili.com/video/BV...",
+  "title": "视频标题",
+  "download_cover": false,
+  "subtitle_track_ids": ["normal:zh-Hans"],
+  "subtitle_format": "srt",
   "merge": false,
   "container": "mp4"
 }
@@ -279,10 +315,11 @@ http://127.0.0.1:8000
 后端校验：
 
 - 未同意合规声明时返回 403。
-- 未选择视频、音频、封面任一资源时返回 400。
+- 未选择视频、音频、封面、字幕任一资源时返回 400。
 - 选择视频但没有选择音频时返回 400。
 - 选择封面但没有 `thumbnail_url` 时返回 400。
 - 即使不下载封面，也可以传入 `thumbnail_url`，用于任务队列展示封面缩略图。
+- `subtitle_format` 只能是 `srt` 或 `txt`。
 - 同时选择视频和音频时，后端会强制合并；即使请求传入 `merge: false`，任务 `options.merge` 也会保存为 `true`。
 
 任务响应示例：
@@ -308,6 +345,8 @@ http://127.0.0.1:8000
     "audio_output_format": "m4a",
     "download_cover": false,
     "thumbnail_url": "https://...",
+    "subtitle_track_ids": ["normal:zh-Hans"],
+    "subtitle_format": "srt",
     "merge": true,
     "container": "mp4",
     "custom_filename": "自定义文件名"
@@ -320,6 +359,7 @@ http://127.0.0.1:8000
 - `custom_filename` 为空或不传时，后端默认使用解析后的标题命名。
 - `custom_filename` 会随任务写入 `options`，重试时继续使用同一自定义文件名。
 - 后端会清理非法文件名字符；如果目标文件已存在，会自动追加序号。
+- 字幕文件命名为 `标题.语言.srt` 或 `标题.语言.txt`；选择多个字幕时会输出多个字幕文件。
 
 ### `GET /api/tasks`
 

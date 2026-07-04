@@ -9,6 +9,8 @@ TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 TaskStage = Literal["queued", "preparing", "downloading", "merging", "completed", "failed", "cancelled"]
 ContainerFormat = Literal["mp4", "mkv"]
 AudioOutputFormat = Literal["m4a", "mp3"]
+SubtitleSource = Literal["normal", "automatic"]
+SubtitleOutputFormat = Literal["srt", "txt"]
 
 
 class HealthResponse(BaseModel):
@@ -59,6 +61,14 @@ class MediaFormat(BaseModel):
     requires_auth: bool = False
 
 
+class SubtitleTrack(BaseModel):
+    id: str
+    language: str
+    label: str
+    source: SubtitleSource
+    formats: list[str]
+
+
 class PreviewResponse(BaseModel):
     url: str
     title: str
@@ -68,6 +78,7 @@ class PreviewResponse(BaseModel):
     webpage_url: str | None = None
     videos: list[MediaFormat]
     audios: list[MediaFormat]
+    subtitles: list[SubtitleTrack] = Field(default_factory=list)
 
 
 class TaskCreateRequest(BaseModel):
@@ -78,6 +89,8 @@ class TaskCreateRequest(BaseModel):
     audio_output_format: AudioOutputFormat = "m4a"
     download_cover: bool = False
     thumbnail_url: str | None = Field(default=None, max_length=2000)
+    subtitle_track_ids: list[str] = Field(default_factory=list, max_length=10)
+    subtitle_format: SubtitleOutputFormat = "srt"
     merge: bool = True
     container: ContainerFormat = "mp4"
     output_dir: str | None = None

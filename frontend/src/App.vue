@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  Captions,
   CheckCircle2,
   CircleX,
   Download,
@@ -19,7 +20,7 @@ import {
   Trash2,
   Video
 } from '@lucide/vue'
-import { api, taskSocketUrl, thumbnailProxyUrl, type AudioOutputFormat, type ContainerFormat, type CookieStatus, type HealthResponse, type MediaFormat, type PreviewResponse, type SettingsResponse, type TaskCreatePayload, type TaskResponse } from './api'
+import { api, taskSocketUrl, thumbnailProxyUrl, type AudioOutputFormat, type ContainerFormat, type CookieStatus, type HealthResponse, type MediaFormat, type PreviewResponse, type SettingsResponse, type SubtitleOutputFormat, type SubtitleTrack, type TaskCreatePayload, type TaskResponse } from './api'
 import { BATCH_LIMIT, buildBatchTaskPayload, buildDefaultBatchTaskOptions, canBuildDefaultBatchTask, canSubmitBatchTask, prepareBatchInputs, type BatchTaskOptions } from './batch'
 
 const FALLBACK_COMPLIANCE_STATEMENT = '本工具仅供学习、研究和个人合理使用，严禁用于侵犯版权或商业传播，用户须自行承担法律责任。'
@@ -54,9 +55,12 @@ const url = ref('')
 const videoFormatId = ref('')
 const audioFormatId = ref('')
 const audioOutputFormat = ref<AudioOutputFormat>('m4a')
+const subtitleTrackIds = ref<string[]>([])
+const subtitleFormat = ref<SubtitleOutputFormat>('srt')
 const includeVideo = ref(false)
 const includeAudio = ref(false)
 const includeCover = ref(false)
+const includeSubtitles = ref(false)
 const singleCustomFilename = ref('')
 const batchText = ref('')
 const batchRows = ref<BatchRow[]>([])
@@ -76,6 +80,7 @@ const complianceAcceptedInPage = ref(false)
 const sockets = new Map<string, WebSocket>()
 const containerOptions: ContainerFormat[] = ['mp4', 'mkv']
 const audioOutputOptions: AudioOutputFormat[] = ['m4a', 'mp3']
+const subtitleOutputOptions: SubtitleOutputFormat[] = ['srt', 'txt']
 const modeOptions = [
   { label: '单链接', value: 'single' },
   { label: '批量', value: 'batch' }
@@ -84,6 +89,7 @@ const modeOptions = [
 const wantsVideo = computed(() => includeVideo.value && Boolean(videoFormatId.value))
 const wantsAudio = computed(() => includeAudio.value && Boolean(audioFormatId.value))
 const wantsCover = computed(() => includeCover.value && Boolean(preview.value?.thumbnail))
+const wantsSubtitles = computed(() => includeSubtitles.value && subtitleTrackIds.value.length > 0)
 const hasRequiredAudioForVideo = computed(() => !wantsVideo.value || wantsAudio.value)
 const finishedTaskCount = computed(() => tasks.value.filter((task) => ['completed', 'failed', 'cancelled'].includes(task.status)).length)
 const complianceDialogVisible = computed(() => complianceLoaded.value && !complianceAcceptedInPage.value)
@@ -102,7 +108,7 @@ const batchSummary = computed(() => {
   return `可提交 ${batchSubmittableRows.value.length} / 失败 ${counts.failed} / 重复 ${counts.duplicate} / 已提交 ${counts.submitted}`
 })
 const canSubmit = computed(() => {
-  return workMode.value === 'single' && complianceAcceptedInPage.value && preview.value && hasRequiredAudioForVideo.value && (wantsVideo.value || wantsAudio.value || wantsCover.value) && !creatingTask.value
+  return workMode.value === 'single' && complianceAcceptedInPage.value && preview.value && hasRequiredAudioForVideo.value && (wantsVideo.value || wantsAudio.value || wantsCover.value || wantsSubtitles.value) && !creatingTask.value
 })
 const singleVideoQualityHint = computed(() => videoQualityHint(preview.value))
 
@@ -190,6 +196,10 @@ function formatRow(item: MediaFormat) {
   return `${item.label} ${details.filter(Boolean).join(' / ')}`
 }
 
+function formatSubtitleTrack(item: SubtitleTrack) {
+  return `${item.label} ${item.formats.join(' / ')}`
+}
+
 function mediaHeight(item: MediaFormat) {
   for (const source of [item.resolution, item.quality, item.label]) {
     if (!source) continue
@@ -231,6 +241,10 @@ function batchWantsCover(row: BatchRow) {
   return Boolean(row.options?.includeCover && row.preview?.thumbnail)
 }
 
+function batchWantsSubtitles(row: BatchRow) {
+  return Boolean(row.options?.includeSubtitles && row.options.subtitleTrackIds.length > 0)
+}
+
 function batchRowLocked(row: BatchRow) {
   return batchActive.value || row.status === 'submitted'
 }
@@ -249,6 +263,7 @@ function batchRowSummary(row: BatchRow) {
   if (batchWantsVideo(row)) resources.push('视频+音频')
   if (!batchWantsVideo(row) && batchWantsAudio(row)) resources.push('音频')
   if (batchWantsCover(row)) resources.push('封面')
+  if (batchWantsSubtitles(row)) resources.push('字幕')
   const filename = row.options.customFilename.trim()
   const parts = [resources.length ? resources.join(' / ') : '未选择资源']
   if (filename) parts.push(`文件名：${filename}`)
@@ -344,6 +359,20 @@ function handleBatchAudioFormatChange(row: BatchRow) {
   }
 }
 
+function handleSingleSubtitleChange() {
+  if (!includeSubtitles.value || !preview.value?.subtitles.length) return
+  if (!subtitleTrackIds.value.length) {
+    subtitleTrackIds.value = [preview.value.subtitles[0].id]
+  }
+}
+
+function handleBatchSubtitleChange(row: BatchRow) {
+  if (!row.options?.includeSubtitles || !row.preview?.subtitles.length) return
+  if (!row.options.subtitleTrackIds.length) {
+    row.options.subtitleTrackIds = [row.preview.subtitles[0].id]
+  }
+}
+
 async function loadBase() {
   await loadComplianceStatus()
   const [healthData, cookieData, settingsData, taskData] = await Promise.all([api.health(), api.cookieStatus(), api.getSettings(), api.listTasks()])
@@ -396,17 +425,23 @@ async function parseUrl() {
     videoFormatId.value = preview.value.videos[0]?.format_id || ''
     audioFormatId.value = preview.value.audios[0]?.format_id || ''
     audioOutputFormat.value = settings.value.default_audio_format
+    subtitleTrackIds.value = preview.value.subtitles[0] ? [preview.value.subtitles[0].id] : []
+    subtitleFormat.value = 'srt'
     includeVideo.value = Boolean(videoFormatId.value)
     includeAudio.value = Boolean(audioFormatId.value)
     includeCover.value = false
+    includeSubtitles.value = false
     ElMessage.success('解析完成')
   } catch (error) {
     preview.value = null
     coverFailed.value = false
     audioOutputFormat.value = settings.value.default_audio_format
+    subtitleTrackIds.value = []
+    subtitleFormat.value = 'srt'
     includeVideo.value = false
     includeAudio.value = false
     includeCover.value = false
+    includeSubtitles.value = false
     ElMessage.error(error instanceof Error ? error.message : '解析失败')
   } finally {
     busy.value = false
@@ -453,6 +488,7 @@ async function createTask() {
   const videoFormat = wantsVideo.value ? videoFormatId.value : undefined
   const audioFormat = wantsAudio.value ? audioFormatId.value : undefined
   const downloadCover = wantsCover.value
+  const selectedSubtitles = wantsSubtitles.value ? subtitleTrackIds.value : []
   try {
     const payload: TaskCreatePayload = {
       url: preview.value.url,
@@ -462,6 +498,8 @@ async function createTask() {
       audio_output_format: audioOutputFormat.value,
       download_cover: downloadCover,
       thumbnail_url: preview.value.thumbnail || undefined,
+      subtitle_track_ids: selectedSubtitles,
+      subtitle_format: subtitleFormat.value,
       merge: Boolean(videoFormat && audioFormat),
       container: videoFormat ? settings.value.default_container : 'mp4',
       output_dir: settings.value.download_dir,
@@ -755,6 +793,7 @@ watch(audioFormatId, (formatId) => {
                 <div><dt>时长</dt><dd>{{ formatDuration(preview.duration) }}</dd></div>
                 <div><dt>视频流</dt><dd>{{ preview.videos.length }}</dd></div>
                 <div><dt>音频流</dt><dd>{{ preview.audios.length }}</dd></div>
+                <div><dt>字幕</dt><dd>{{ preview.subtitles.length }}</dd></div>
               </dl>
             </div>
           </div>
@@ -849,6 +888,20 @@ watch(audioFormatId, (formatId) => {
                       {{ !row.preview.thumbnail ? '无封面' : row.options.includeCover ? '封面图片' : '未选封面' }}
                     </div>
                   </section>
+
+                  <section class="batch-setting-group">
+                    <div class="batch-setting-head">
+                      <span><Captions :size="16" />字幕</span>
+                      <el-checkbox v-model="row.options.includeSubtitles" :disabled="batchRowLocked(row) || !row.preview.subtitles.length" @change="handleBatchSubtitleChange(row)">下载</el-checkbox>
+                    </div>
+                    <el-select v-model="row.options.subtitleTrackIds" placeholder="选择字幕" multiple collapse-tags collapse-tags-tooltip :disabled="batchRowLocked(row) || !row.options.includeSubtitles || !row.preview.subtitles.length">
+                      <el-option v-for="item in row.preview.subtitles" :key="item.id" :label="formatSubtitleTrack(item)" :value="item.id" />
+                    </el-select>
+                    <div class="inline-setting">
+                      <span>输出格式</span>
+                      <el-segmented v-model="row.options.subtitleFormat" :options="subtitleOutputOptions" :disabled="batchRowLocked(row) || !row.options.includeSubtitles || !row.preview.subtitles.length" />
+                    </div>
+                  </section>
                 </div>
 
                 <el-form class="batch-row-form" label-position="top">
@@ -910,6 +963,20 @@ watch(audioFormatId, (formatId) => {
                 {{ !preview?.thumbnail ? '无封面' : includeCover ? '封面图片' : '未选封面' }}
               </div>
             </section>
+
+            <section class="resource-option">
+              <div class="resource-option-head">
+                <span><Captions :size="16" />字幕</span>
+                <el-checkbox v-model="includeSubtitles" :disabled="!preview?.subtitles.length" @change="handleSingleSubtitleChange">下载</el-checkbox>
+              </div>
+              <el-select v-model="subtitleTrackIds" placeholder="选择字幕" multiple collapse-tags collapse-tags-tooltip :disabled="!includeSubtitles || !preview?.subtitles.length">
+                <el-option v-for="item in preview?.subtitles || []" :key="item.id" :label="formatSubtitleTrack(item)" :value="item.id" />
+              </el-select>
+              <div class="inline-setting">
+                <span>输出格式</span>
+                <el-segmented v-model="subtitleFormat" :options="subtitleOutputOptions" :disabled="!includeSubtitles || !preview?.subtitles.length" />
+              </div>
+            </section>
           </div>
 
           <el-form label-position="top">
@@ -924,7 +991,7 @@ watch(audioFormatId, (formatId) => {
         </template>
 
         <template v-else>
-          <p class="batch-submit-note">默认使用视频 + 音频，封面不选；可展开单行调整。</p>
+          <p class="batch-submit-note">默认使用视频 + 音频，封面和字幕不选；可展开单行调整。</p>
           <el-button :icon="Download" type="success" size="large" :disabled="!canSubmitBatch" :loading="submittingBatch" @click="submitBatchTasks">
             提交批量
           </el-button>

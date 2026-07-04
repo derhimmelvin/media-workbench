@@ -72,6 +72,29 @@ def test_normalize_preview_prioritizes_higher_resolution_over_bitrate():
     assert [item.format_id for item in preview.videos] == ["video-1080", "video-480"]
 
 
+def test_normalize_preview_includes_subtitles_and_filters_danmaku():
+    extractor = YtDlpBilibiliExtractor()
+    preview = extractor._normalize_preview(
+        "https://www.bilibili.com/video/BV1xx",
+        {
+            "title": "Example",
+            "formats": [],
+            "subtitles": {
+                "zh-Hans": [{"ext": "srt", "data": "1\n..."}],
+                "danmaku": [{"ext": "xml", "url": "https://comment.bilibili.com/1.xml"}],
+            },
+            "automatic_captions": {
+                "zh-Hans": [{"ext": "vtt", "url": "https://example.test/zh.vtt"}],
+                "en": [{"ext": "vtt", "url": "https://example.test/en.vtt"}],
+            },
+        },
+    )
+
+    assert [item.id for item in preview.subtitles] == ["normal:zh-Hans", "automatic:en"]
+    assert preview.subtitles[0].formats == ["srt"]
+    assert preview.subtitles[1].formats == ["vtt"]
+
+
 def test_normalize_url_removes_tracking_parameters():
     extractor = YtDlpBilibiliExtractor()
 
@@ -107,6 +130,7 @@ def test_fetch_info_uses_temporary_cookiefile(monkeypatch):
     class FakeYoutubeDL:
         def __init__(self, options):
             self.options = options
+            assert options["listsubtitles"] is True
             cookie_path = Path(options["cookiefile"])
             cookie_paths.append(cookie_path)
             assert cookie_path.exists()
@@ -220,7 +244,7 @@ def test_download_rejects_empty_resource_selection(tmp_path):
             }
         )
     except Exception as exc:
-        assert "请至少选择一个视频、音频或封面资源" in str(exc)
+        assert "请至少选择一个视频、音频、封面或字幕资源" in str(exc)
     else:
         raise AssertionError("Expected empty selection to fail.")
 
@@ -379,3 +403,105 @@ def test_download_uses_custom_filename(tmp_path, monkeypatch):
     )
 
     assert output == str(tmp_path / "我的文件.m4a")
+
+
+def test_download_subtitles_only_writes_selected_language(tmp_path, monkeypatch):
+    captured_options = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            captured_options.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def download(self, urls):
+            target = self.options["outtmpl"].replace("%(ext)s", "zh-Hans.srt")
+            with open(target, "w", encoding="utf-8") as file:
+                file.write("1\n00:00:00,000 --> 00:00:01,000\n字幕\n")
+
+        @property
+        def options(self):
+            return captured_options
+
+    monkeypatch.setattr(YtDlpBilibiliExtractor, "_ydl_class", lambda self: FakeYoutubeDL)
+
+    output = YtDlpBilibiliExtractor().download(
+        {
+            "url": "https://www.bilibili.com/video/BV1xx",
+            "title": "Example",
+            "output_dir": str(tmp_path),
+            "options": {
+                "video_format_id": None,
+                "audio_format_id": None,
+                "audio_output_format": "m4a",
+                "download_cover": False,
+                "thumbnail_url": None,
+                "subtitle_track_ids": ["normal:zh-Hans"],
+                "subtitle_format": "srt",
+                "merge": False,
+                "container": "mp4",
+            },
+        }
+    )
+
+    assert output == str(tmp_path / "Example.zh-Hans.srt")
+    assert captured_options["skip_download"] is True
+    assert captured_options["writesubtitles"] is True
+    assert captured_options["writeautomaticsub"] is False
+    assert captured_options["subtitleslangs"] == ["zh-Hans"]
+    assert captured_options["subtitlesformat"] == "srt/vtt/best"
+    assert captured_options["postprocessors"][0]["key"] == "FFmpegSubtitlesConvertor"
+
+
+def test_download_txt_subtitles_converts_to_plain_text(tmp_path, monkeypatch):
+    captured_options = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            captured_options.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def download(self, urls):
+            target = self.options["outtmpl"].replace("%(ext)s", "zh-Hans.srt")
+            with open(target, "w", encoding="utf-8") as file:
+                file.write("1\n00:00:00,000 --> 00:00:01,000\n第一行<br>字幕\n\n2\n00:00:01,000 --> 00:00:02,000\n第二行\n")
+
+        @property
+        def options(self):
+            return captured_options
+
+    monkeypatch.setattr(YtDlpBilibiliExtractor, "_ydl_class", lambda self: FakeYoutubeDL)
+
+    output = YtDlpBilibiliExtractor().download(
+        {
+            "url": "https://www.bilibili.com/video/BV1xx",
+            "title": "Example",
+            "output_dir": str(tmp_path),
+            "options": {
+                "video_format_id": None,
+                "audio_format_id": None,
+                "audio_output_format": "m4a",
+                "download_cover": False,
+                "thumbnail_url": None,
+                "subtitle_track_ids": ["normal:zh-Hans"],
+                "subtitle_format": "txt",
+                "merge": False,
+                "container": "mp4",
+            },
+        }
+    )
+
+    assert output == str(tmp_path / "Example.zh-Hans.txt")
+    assert (tmp_path / "Example.zh-Hans.txt").read_text(encoding="utf-8") == "第一行字幕\n第二行\n"
+    assert not (tmp_path / "Example.zh-Hans.srt").exists()
+    assert captured_options["subtitlesformat"] == "srt/vtt/best"
+    assert captured_options["postprocessors"] == []

@@ -133,6 +133,8 @@ class TaskExecutor:
             "audio_output_format": request.audio_output_format,
             "download_cover": request.download_cover,
             "thumbnail_url": request.thumbnail_url,
+            "subtitle_track_ids": request.subtitle_track_ids,
+            "subtitle_format": request.subtitle_format,
             "merge": should_merge,
             "container": request.container,
             "custom_filename": request.custom_filename.strip() if request.custom_filename else None,

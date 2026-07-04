@@ -131,7 +131,7 @@ def health() -> HealthResponse:
     if not versions.get("yt_dlp"):
         messages.append("yt-dlp 未安装，无法解析和下载。")
     if not ffmpeg_available():
-        messages.append("FFmpeg 未安装，无法合并音视频。")
+        messages.append("FFmpeg 未安装，无法合并音视频、转换 MP3 或处理部分字幕源格式。")
     keyring_ok = credential_store.is_available()
     if not keyring_ok:
         messages.append("系统钥匙串不可用，Cookie 无法持久化。")
@@ -261,8 +261,8 @@ def create_task(request: TaskCreateRequest) -> TaskResponse:
     _require_compliance()
     if not extractor.supports(request.url):
         raise HTTPException(status_code=400, detail=UNSUPPORTED_INPUT_MESSAGE)
-    if not request.video_format_id and not request.audio_format_id and not request.download_cover:
-        raise HTTPException(status_code=400, detail="请至少选择一个视频、音频或封面资源。")
+    if not request.video_format_id and not request.audio_format_id and not request.download_cover and not request.subtitle_track_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个视频、音频、封面或字幕资源。")
     if request.video_format_id and not request.audio_format_id:
         raise HTTPException(status_code=400, detail="下载视频需要同时选择音频流，否则文件会没有声音。")
     if request.download_cover and not request.thumbnail_url:

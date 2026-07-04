@@ -90,6 +90,15 @@ describe('batch task options', () => {
           filesize: null,
           requires_auth: false
         }
+      ],
+      subtitles: [
+        {
+          id: 'normal:zh-Hans',
+          language: 'zh-Hans',
+          label: '中文（简体）',
+          source: 'normal',
+          formats: ['srt']
+        }
       ]
     }
   }
@@ -110,6 +119,9 @@ describe('batch task options', () => {
       audioFormatId: 'audio-30280',
       audioOutputFormat: 'mp3',
       includeCover: false,
+      includeSubtitles: false,
+      subtitleTrackIds: ['normal:zh-Hans'],
+      subtitleFormat: 'srt',
       container: 'mkv',
       customFilename: ''
     })
@@ -140,6 +152,8 @@ describe('batch task options', () => {
       audio_output_format: 'm4a',
       download_cover: true,
       thumbnail_url: 'https://i0.hdslb.com/bfs/archive/cover.jpg',
+      subtitle_track_ids: [],
+      subtitle_format: 'srt',
       merge: false,
       container: 'mp4',
       output_dir: '/tmp/downloads',
@@ -194,5 +208,36 @@ describe('batch task options', () => {
     }
 
     expect(canSubmitBatchTask(preview, options)).toBe(false)
+  })
+
+  it('builds payload for subtitle-only rows', () => {
+    const settings: SettingsResponse = {
+      download_dir: '/tmp/downloads',
+      default_container: 'mkv',
+      default_audio_format: 'm4a',
+      max_concurrent_downloads: 1
+    }
+    const preview = previewFixture()
+    const options = {
+      ...buildDefaultBatchTaskOptions(preview, 'mkv', 'm4a'),
+      includeVideo: false,
+      videoFormatId: '',
+      includeAudio: false,
+      audioFormatId: '',
+      includeSubtitles: true,
+      subtitleTrackIds: ['normal:zh-Hans'],
+      subtitleFormat: 'txt' as const
+    }
+
+    expect(canSubmitBatchTask(preview, options)).toBe(true)
+    expect(buildBatchTaskPayload(preview, settings, options)).toMatchObject({
+      video_format_id: undefined,
+      audio_format_id: undefined,
+      download_cover: false,
+      subtitle_track_ids: ['normal:zh-Hans'],
+      subtitle_format: 'txt',
+      merge: false,
+      container: 'mp4'
+    })
   })
 })

@@ -5,13 +5,14 @@ import subprocess
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .base import AuthContext, BaseExtractor, ExtractorError
 from ..media import MediaProxyError, ThumbnailPayload, fetch_thumbnail
-from ..schemas import MediaFormat, PreviewResponse
+from ..schemas import MediaFormat, PreviewResponse, SubtitleTrack
 from ..utils import (
     ffmpeg_available,
     sanitize_filename,
@@ -26,6 +27,18 @@ ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SAFE_BILIBILI_QUERY_KEYS = {"p", "page", "bvid", "aid", "cid", "ep_id", "season_id"}
 COOKIE_ATTRIBUTE_NAMES = {"domain", "path", "expires", "max-age", "secure", "httponly", "samesite"}
 UNSUPPORTED_INPUT_MESSAGE = "这不是可解析的视频链接。请填写 B站视频链接、BV号、av号、ep号或 ss号。"
+SUPPORTED_SUBTITLE_OUTPUT_FORMATS = {"srt", "txt"}
+SUPPORTED_SUBTITLE_SOURCE_FORMATS = {"srt", "vtt"}
+SUBTITLE_ID_PATTERN = re.compile(r"^(normal|automatic):([^:]+)$")
+SUBTITLE_LANGUAGE_LABELS = {
+    "zh": "中文",
+    "zh-CN": "中文",
+    "zh-Hans": "中文（简体）",
+    "zh-Hant": "中文（繁体）",
+    "en": "英语",
+    "ja": "日语",
+    "ko": "韩语",
+}
 
 
 class _YtDlpLogger:
@@ -175,6 +188,140 @@ def _media_height(item: MediaFormat) -> int:
     return 0
 
 
+def _subtitle_formats(entries: Any) -> list[str]:
+    if not isinstance(entries, list):
+        return []
+    formats: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        extension = str(entry.get("ext") or "").lower()
+        if extension in SUPPORTED_SUBTITLE_SOURCE_FORMATS and extension not in formats:
+            formats.append(extension)
+    return formats
+
+
+def _subtitle_label(language: str, source: str) -> str:
+    label = SUBTITLE_LANGUAGE_LABELS.get(language, language)
+    return f"{label} · 自动字幕" if source == "automatic" else label
+
+
+def _normalize_subtitle_tracks(raw: dict[str, Any]) -> list[SubtitleTrack]:
+    tracks: list[SubtitleTrack] = []
+    normal_languages: set[str] = set()
+
+    for language, entries in (raw.get("subtitles") or {}).items():
+        language = str(language)
+        if language == "danmaku":
+            continue
+        formats = _subtitle_formats(entries)
+        if not formats:
+            continue
+        normal_languages.add(language)
+        tracks.append(
+            SubtitleTrack(
+                id=f"normal:{language}",
+                language=language,
+                label=_subtitle_label(language, "normal"),
+                source="normal",
+                formats=formats,
+            )
+        )
+
+    for language, entries in (raw.get("automatic_captions") or {}).items():
+        language = str(language)
+        if language == "danmaku" or language in normal_languages:
+            continue
+        formats = _subtitle_formats(entries)
+        if not formats:
+            continue
+        tracks.append(
+            SubtitleTrack(
+                id=f"automatic:{language}",
+                language=language,
+                label=_subtitle_label(language, "automatic"),
+                source="automatic",
+                formats=formats,
+            )
+        )
+
+    return tracks
+
+
+def _subtitle_languages_by_source(track_ids: list[str]) -> tuple[set[str], set[str]]:
+    normal_languages: set[str] = set()
+    automatic_languages: set[str] = set()
+    for track_id in track_ids:
+        match = SUBTITLE_ID_PATTERN.match(track_id)
+        if not match:
+            raise ExtractorError("字幕选项无效，请重新解析后选择字幕。")
+        source, language = match.groups()
+        if language == "danmaku":
+            raise ExtractorError("弹幕不属于当前字幕下载范围。")
+        if source == "normal":
+            normal_languages.add(language)
+        else:
+            automatic_languages.add(language)
+    return normal_languages, automatic_languages
+
+
+def _find_downloaded_subtitles(
+    output_dir: Path,
+    stem: str,
+    before: set[Path],
+    languages: set[str],
+    subtitle_formats: set[str],
+) -> list[Path]:
+    candidates = [
+        path
+        for path in output_dir.iterdir()
+        if path.is_file()
+        and path not in before
+        and path.name.startswith(f"{stem}.")
+        and path.suffix.lower().lstrip(".") in subtitle_formats
+        and any(path.name.endswith(f".{language}.{subtitle_format}") for language in languages for subtitle_format in subtitle_formats)
+    ]
+    return sorted(candidates, key=lambda path: path.name)
+
+
+def _plain_subtitle_text(content: str, extension: str) -> str:
+    lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    output: list[str] = []
+    skip_block = False
+
+    for index, line in enumerate(lines):
+        stripped = line.strip().lstrip("\ufeff")
+        if not stripped:
+            skip_block = False
+            continue
+        if stripped == "WEBVTT" or stripped.startswith("WEBVTT "):
+            continue
+        if stripped.startswith(("NOTE", "STYLE", "REGION")):
+            skip_block = True
+            continue
+        if skip_block:
+            continue
+        if "-->" in stripped:
+            continue
+        if extension == "srt" and stripped.isdigit():
+            continue
+        if index + 1 < len(lines) and "-->" in lines[index + 1]:
+            continue
+
+        text = unescape(re.sub(r"<[^>]+>", "", stripped)).strip()
+        if text:
+            output.append(text)
+
+    return "\n".join(output) + ("\n" if output else "")
+
+
+def _convert_subtitle_to_txt(source_path: Path, target_path: Path) -> Path:
+    extension = source_path.suffix.lower().lstrip(".")
+    content = source_path.read_text(encoding="utf-8-sig", errors="replace")
+    target_path.write_text(_plain_subtitle_text(content, extension), encoding="utf-8")
+    return target_path
+
+
 class YtDlpBilibiliExtractor(BaseExtractor):
     def supports(self, url: str) -> bool:
         stripped = url.strip()
@@ -299,7 +446,7 @@ class YtDlpBilibiliExtractor(BaseExtractor):
         YoutubeDL = self._ydl_class()
         normalized_url = self.normalize_url(url)
         try:
-            with self._ydl_options(auth) as options:
+            with self._ydl_options(auth, listsubtitles=True) as options:
                 with YoutubeDL(options) as ydl:
                     raw = ydl.extract_info(normalized_url, download=False)
         except Exception as exc:
@@ -394,6 +541,7 @@ class YtDlpBilibiliExtractor(BaseExtractor):
             webpage_url=raw.get("webpage_url") or raw.get("original_url"),
             videos=videos,
             audios=audios,
+            subtitles=_normalize_subtitle_tracks(raw),
         )
 
     def download(self, task: dict[str, Any], auth: AuthContext | None = None, progress_hook=None) -> str:
@@ -407,10 +555,16 @@ class YtDlpBilibiliExtractor(BaseExtractor):
         audio_output_format = options.get("audio_output_format", "m4a")
         download_cover = bool(options.get("download_cover", False))
         thumbnail_url = options.get("thumbnail_url")
+        subtitle_track_ids = [str(track_id) for track_id in options.get("subtitle_track_ids") or [] if str(track_id)]
+        subtitle_format = str(options.get("subtitle_format") or "srt").lower()
         has_media_output = bool(video_format_id or audio_format_id)
-        has_multiple_outputs = bool(download_cover and has_media_output) or bool(video_format_id and audio_format_id and not merge)
-        if not video_format_id and not audio_format_id and not download_cover:
-            raise ExtractorError("请至少选择一个视频、音频或封面资源。")
+        has_subtitle_output = bool(subtitle_track_ids)
+        selected_output_count = sum(1 for enabled in (has_media_output, download_cover, has_subtitle_output) if enabled)
+        has_multiple_outputs = selected_output_count > 1 or bool(video_format_id and audio_format_id and not merge)
+        if subtitle_format not in SUPPORTED_SUBTITLE_OUTPUT_FORMATS:
+            raise ExtractorError("字幕输出格式仅支持 srt 或 txt。")
+        if not video_format_id and not audio_format_id and not download_cover and not has_subtitle_output:
+            raise ExtractorError("请至少选择一个视频、音频、封面或字幕资源。")
         if video_format_id and not audio_format_id:
             raise ExtractorError("下载视频需要同时选择音频流，否则文件会没有声音。")
 
@@ -418,6 +572,11 @@ class YtDlpBilibiliExtractor(BaseExtractor):
             raise ExtractorError("未检测到 FFmpeg，无法合并音视频。")
 
         outputs: list[str] = []
+        subtitle_stem = (
+            _output_stem(output_dir, task, options, "subtitle", distinct_resource=False)
+            if has_subtitle_output
+            else None
+        )
         if download_cover:
             if not thumbnail_url:
                 raise ExtractorError("当前资源没有可下载的封面。")
@@ -431,6 +590,17 @@ class YtDlpBilibiliExtractor(BaseExtractor):
             outputs.append(str(cover_path))
 
         if not video_format_id and not audio_format_id:
+            if has_subtitle_output and subtitle_stem:
+                outputs.extend(
+                    self._download_subtitles(
+                        task,
+                        auth,
+                        subtitle_track_ids,
+                        subtitle_format,
+                        output_dir,
+                        subtitle_stem,
+                    )
+                )
             return "\n".join(outputs)
 
         YoutubeDL = self._ydl_class()
@@ -457,29 +627,91 @@ class YtDlpBilibiliExtractor(BaseExtractor):
                 with YoutubeDL(download_options) as ydl:
                     ydl.download([self.normalize_url(task["url"])])
                 outputs.append(str(_find_downloaded_file(output_dir, output_stem, before)))
-                return "\n".join(outputs)
-
-            for label, format_id in (("video", video_format_id), ("audio", audio_format_id)):
-                if not format_id:
-                    continue
-                single_options = dict(download_options)
-                single_options["format"] = format_id
-                output_stem = _output_stem(output_dir, task, options, label, distinct_resource=has_multiple_outputs)
-                before = {
-                    path
-                    for path in output_dir.iterdir()
-                    if path.is_file() and path.name.startswith(f"{output_stem}.")
-                }
-                single_options["outtmpl"] = str(output_dir / f"{output_stem}.%(ext)s")
-                with YoutubeDL(single_options) as ydl:
-                    ydl.download([self.normalize_url(task["url"])])
-                downloaded_path = _find_downloaded_file(output_dir, output_stem, before)
-                if label == "audio" and audio_output_format == "mp3":
-                    source_path = downloaded_path
-                    target_path = unique_path(output_dir / f"{output_stem}.mp3")
-                    if source_path.suffix.lower() != ".mp3":
-                        downloaded_path = _convert_audio_to_mp3(source_path, target_path)
-                    if source_path != downloaded_path and source_path.exists():
-                        source_path.unlink()
-                outputs.append(str(downloaded_path))
+            else:
+                for label, format_id in (("video", video_format_id), ("audio", audio_format_id)):
+                    if not format_id:
+                        continue
+                    single_options = dict(download_options)
+                    single_options["format"] = format_id
+                    output_stem = _output_stem(output_dir, task, options, label, distinct_resource=has_multiple_outputs)
+                    before = {
+                        path
+                        for path in output_dir.iterdir()
+                        if path.is_file() and path.name.startswith(f"{output_stem}.")
+                    }
+                    single_options["outtmpl"] = str(output_dir / f"{output_stem}.%(ext)s")
+                    with YoutubeDL(single_options) as ydl:
+                        ydl.download([self.normalize_url(task["url"])])
+                    downloaded_path = _find_downloaded_file(output_dir, output_stem, before)
+                    if label == "audio" and audio_output_format == "mp3":
+                        source_path = downloaded_path
+                        target_path = unique_path(output_dir / f"{output_stem}.mp3")
+                        if source_path.suffix.lower() != ".mp3":
+                            downloaded_path = _convert_audio_to_mp3(source_path, target_path)
+                        if source_path != downloaded_path and source_path.exists():
+                            source_path.unlink()
+                    outputs.append(str(downloaded_path))
+        if has_subtitle_output and subtitle_stem:
+            outputs.extend(
+                self._download_subtitles(
+                    task,
+                    auth,
+                    subtitle_track_ids,
+                    subtitle_format,
+                    output_dir,
+                    subtitle_stem,
+                )
+            )
         return "\n".join(outputs)
+
+    def _download_subtitles(
+        self,
+        task: dict[str, Any],
+        auth: AuthContext | None,
+        subtitle_track_ids: list[str],
+        subtitle_format: str,
+        output_dir: Path,
+        output_stem: str,
+    ) -> list[str]:
+        normal_languages, automatic_languages = _subtitle_languages_by_source(subtitle_track_ids)
+        languages = normal_languages | automatic_languages
+        if not languages:
+            return []
+        before = {
+            path
+            for path in output_dir.iterdir()
+            if path.is_file() and path.name.startswith(f"{output_stem}.")
+        }
+        target_subtitle_format = "srt" if subtitle_format == "txt" else subtitle_format
+        with self._ydl_options(
+            auth,
+            skip_download=True,
+            writesubtitles=bool(normal_languages),
+            writeautomaticsub=bool(automatic_languages),
+            subtitleslangs=sorted(languages),
+            subtitlesformat=f"{target_subtitle_format}/vtt/best",
+            outtmpl=str(output_dir / f"{output_stem}.%(ext)s"),
+            postprocessors=[] if subtitle_format == "txt" else [
+                {
+                    "key": "FFmpegSubtitlesConvertor",
+                    "format": subtitle_format,
+                    "when": "before_dl",
+                }
+            ],
+        ) as subtitle_options:
+            with self._ydl_class()(subtitle_options) as ydl:
+                ydl.download([self.normalize_url(task["url"])])
+
+        if subtitle_format == "txt":
+            source_paths = _find_downloaded_subtitles(output_dir, output_stem, before, languages, {"srt", "vtt"})
+            paths = []
+            for source_path in source_paths:
+                target_path = unique_path(source_path.with_suffix(".txt"))
+                paths.append(_convert_subtitle_to_txt(source_path, target_path))
+                if source_path != target_path:
+                    source_path.unlink(missing_ok=True)
+        else:
+            paths = _find_downloaded_subtitles(output_dir, output_stem, before, languages, {subtitle_format})
+        if not paths:
+            raise ExtractorError("未下载到所选字幕，请重新解析后选择可用字幕。")
+        return [str(path) for path in paths]

@@ -23,6 +23,8 @@ export type CookieStatus = {
 
 export type ContainerFormat = 'mp4' | 'mkv'
 export type AudioOutputFormat = 'm4a' | 'mp3'
+export type SubtitleOutputFormat = 'srt' | 'txt'
+export type SubtitleSource = 'normal' | 'automatic'
 
 export type SettingsResponse = {
   download_dir: string
@@ -44,6 +46,14 @@ export type MediaFormat = {
   requires_auth: boolean
 }
 
+export type SubtitleTrack = {
+  id: string
+  language: string
+  label: string
+  source: SubtitleSource
+  formats: string[]
+}
+
 export type PreviewResponse = {
   url: string
   title: string
@@ -53,6 +63,7 @@ export type PreviewResponse = {
   webpage_url: string | null
   videos: MediaFormat[]
   audios: MediaFormat[]
+  subtitles: SubtitleTrack[]
 }
 
 export type TaskResponse = {
@@ -89,6 +100,8 @@ export type TaskCreatePayload = {
   audio_output_format?: AudioOutputFormat
   download_cover?: boolean
   thumbnail_url?: string
+  subtitle_track_ids?: string[]
+  subtitle_format?: SubtitleOutputFormat
   merge: boolean
   container: ContainerFormat
   output_dir?: string

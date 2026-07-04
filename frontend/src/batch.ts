@@ -1,4 +1,4 @@
-import type { AudioOutputFormat, ContainerFormat, PreviewResponse, SettingsResponse, TaskCreatePayload } from './api'
+import type { AudioOutputFormat, ContainerFormat, PreviewResponse, SettingsResponse, SubtitleOutputFormat, TaskCreatePayload } from './api'
 
 export const BATCH_LIMIT = 50
 
@@ -18,6 +18,9 @@ export type BatchTaskOptions = {
   audioFormatId: string
   audioOutputFormat: AudioOutputFormat
   includeCover: boolean
+  includeSubtitles: boolean
+  subtitleTrackIds: string[]
+  subtitleFormat: SubtitleOutputFormat
   container: ContainerFormat
   customFilename: string
 }
@@ -74,6 +77,9 @@ export function buildDefaultBatchTaskOptions(
     audioFormatId,
     audioOutputFormat,
     includeCover: false,
+    includeSubtitles: false,
+    subtitleTrackIds: preview.subtitles[0] ? [preview.subtitles[0].id] : [],
+    subtitleFormat: 'srt',
     container: includeVideo ? container : 'mp4',
     customFilename: ''
   }
@@ -83,8 +89,9 @@ export function canSubmitBatchTask(preview: PreviewResponse, options: BatchTaskO
   const wantsVideo = options.includeVideo && Boolean(options.videoFormatId)
   const wantsAudio = options.includeAudio && Boolean(options.audioFormatId)
   const wantsCover = options.includeCover && Boolean(preview.thumbnail)
+  const wantsSubtitles = options.includeSubtitles && options.subtitleTrackIds.length > 0
 
-  return (!wantsVideo || wantsAudio) && (wantsVideo || wantsAudio || wantsCover)
+  return (!wantsVideo || wantsAudio) && (wantsVideo || wantsAudio || wantsCover || wantsSubtitles)
 }
 
 export function buildBatchTaskPayload(
@@ -95,6 +102,7 @@ export function buildBatchTaskPayload(
   const wantsVideo = options.includeVideo && Boolean(options.videoFormatId)
   const wantsAudio = options.includeAudio && Boolean(options.audioFormatId)
   const wantsCover = options.includeCover && Boolean(preview.thumbnail)
+  const wantsSubtitles = options.includeSubtitles && options.subtitleTrackIds.length > 0
 
   return {
     url: preview.url,
@@ -104,6 +112,8 @@ export function buildBatchTaskPayload(
     audio_output_format: options.audioOutputFormat,
     download_cover: wantsCover,
     thumbnail_url: preview.thumbnail || undefined,
+    subtitle_track_ids: wantsSubtitles ? options.subtitleTrackIds : [],
+    subtitle_format: options.subtitleFormat,
     merge: wantsVideo && wantsAudio,
     container: wantsVideo ? options.container : 'mp4',
     output_dir: settings.download_dir,

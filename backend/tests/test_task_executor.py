@@ -145,6 +145,29 @@ def test_task_executor_persists_custom_filename_option(tmp_path: Path):
     assert options["custom_filename"] == "自定义名称"
 
 
+def test_task_executor_persists_subtitle_options(tmp_path: Path):
+    db = Database(tmp_path / "app.sqlite3")
+    db.initialize()
+    config = AppConfig(data_dir=tmp_path, database_path=tmp_path / "app.sqlite3", default_download_dir=tmp_path / "downloads")
+    executor = TaskExecutor(db, FakeExtractor(), FakeCredentialStore(), config, TaskWebSocketHub())
+
+    task = executor.submit(
+        TaskCreateRequest(
+            url="https://www.bilibili.com/video/BV1xx",
+            title="Example",
+            subtitle_track_ids=["normal:zh-Hans"],
+            subtitle_format="txt",
+            merge=False,
+            output_dir=str(tmp_path / "downloads"),
+        )
+    )
+    row = db.query_one("SELECT options_json FROM tasks WHERE id = ?", (task.id,))
+    options = json.loads(row["options_json"])
+
+    assert options["subtitle_track_ids"] == ["normal:zh-Hans"]
+    assert options["subtitle_format"] == "txt"
+
+
 def test_task_executor_persists_thumbnail_for_task_list_when_cover_not_downloaded(tmp_path: Path):
     db = Database(tmp_path / "app.sqlite3")
     db.initialize()

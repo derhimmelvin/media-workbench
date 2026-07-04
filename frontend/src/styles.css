@@ -402,7 +402,7 @@ textarea {
 
 .batch-setting-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
 
@@ -411,6 +411,10 @@ textarea {
   display: grid;
   align-content: start;
   gap: 10px;
+}
+
+.batch-setting-group .el-select {
+  width: 100%;
 }
 
 .batch-setting-head {
