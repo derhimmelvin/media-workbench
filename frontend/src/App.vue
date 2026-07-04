@@ -89,6 +89,7 @@ const finishedTaskCount = computed(() => tasks.value.filter((task) => ['complete
 const complianceDialogVisible = computed(() => complianceLoaded.value && !complianceAcceptedInPage.value)
 const batchActive = computed(() => parsingBatch.value || submittingBatch.value)
 const batchSubmittableRows = computed(() => batchRows.value.filter((row) => canSubmitBatchRow(row)))
+const canClearBatch = computed(() => !batchActive.value && (batchRows.value.length > 0 || batchText.value.trim().length > 0))
 const canSubmitBatch = computed(() => complianceAcceptedInPage.value && batchSubmittableRows.value.length > 0 && !batchActive.value)
 const batchSummary = computed(() => {
   const counts = batchRows.value.reduce<Record<BatchRowStatus, number>>(
@@ -554,6 +555,7 @@ function removeBatchRow(row: BatchRow) {
 }
 
 function clearBatchRows() {
+  batchText.value = ''
   batchRows.value = []
 }
 
@@ -772,7 +774,7 @@ watch(audioFormatId, (formatId) => {
               <el-button :icon="RefreshCw" type="primary" :loading="parsingBatch" :disabled="!complianceAcceptedInPage || batchActive" @click="parseBatchRows">
                 解析批量
               </el-button>
-              <el-button :icon="Trash2" text type="danger" :disabled="batchActive || !batchRows.length" @click="clearBatchRows">清空</el-button>
+              <el-button :icon="Trash2" text type="danger" :disabled="!canClearBatch" @click="clearBatchRows">清空</el-button>
             </div>
           </div>
 
